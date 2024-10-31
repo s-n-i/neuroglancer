@@ -342,6 +342,7 @@ async function getMeshSource(
     sharding: metadata.sharding,
     nBitsForLayerId: nBitsForLayerId,
   };
+  console.log('transform', metadata.transform);
   return {
     source: chunkManager.getChunkSource(GrapheneMultiscaleMeshSource, {
       credentialsProvider,

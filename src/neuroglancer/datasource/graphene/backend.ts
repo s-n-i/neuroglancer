@@ -14,105 +14,172 @@
  * limitations under the License.
  */
 
-import {WithParameters} from 'neuroglancer/chunk_manager/backend';
-import {WithSharedCredentialsProviderCounterpart} from 'neuroglancer/credentials_provider/shared_counterpart';
-import {assignMeshFragmentData, assignMultiscaleMeshFragmentData, FragmentChunk, FragmentId, ManifestChunk, MeshSource, MultiscaleFragmentChunk, MultiscaleManifestChunk, MultiscaleMeshSource} from 'neuroglancer/mesh/backend';
-import {getGrapheneFragmentKey, MultiscaleMeshSourceParameters, responseIdentity} from 'neuroglancer/datasource/graphene/base';
-import {CancellationToken} from 'neuroglancer/util/cancellation';
-import {isNotFoundError, responseArrayBuffer, responseJson} from 'neuroglancer/util/http_request';
-import {cancellableFetchSpecialOk, SpecialProtocolCredentials, SpecialProtocolCredentialsProvider} from 'neuroglancer/util/special_protocol_request';
-import {Uint64} from 'neuroglancer/util/uint64';
-import {registerSharedObject} from 'neuroglancer/worker_rpc';
-import {ChunkedGraphSourceParameters, MeshSourceParameters} from 'neuroglancer/datasource/graphene/base';
-import {decodeManifestChunk} from 'neuroglancer/datasource/precomputed/backend';
-import {fetchSpecialHttpByteRange} from 'neuroglancer/util/byte_range_http_requests';
-import debounce from 'lodash/debounce';
-import {withChunkManager, Chunk, ChunkSource} from 'neuroglancer/chunk_manager/backend';
-import {ChunkPriorityTier, ChunkState} from 'neuroglancer/chunk_manager/base';
-import {TransformedSource, forEachPlaneIntersectingVolumetricChunk, getNormalizedChunkLayout, SliceViewProjectionParameters} from 'neuroglancer/sliceview/base';
-import {CHUNKED_GRAPH_LAYER_RPC_ID, ChunkedGraphChunkSpecification, CHUNKED_GRAPH_RENDER_LAYER_UPDATE_SOURCES_RPC_ID, RENDER_RATIO_LIMIT} from 'neuroglancer/datasource/graphene/base';
-import {Uint64Set} from 'neuroglancer/uint64_set';
-import {vec3, vec3Key} from 'neuroglancer/util/geom';
-import {registerRPC, RPC} from 'neuroglancer/worker_rpc';
+import { WithParameters } from "neuroglancer/chunk_manager/backend";
+import { WithSharedCredentialsProviderCounterpart } from "neuroglancer/credentials_provider/shared_counterpart";
+import {
+  assignMeshFragmentData,
+  assignMultiscaleMeshFragmentData,
+  FragmentChunk,
+  FragmentId,
+  ManifestChunk,
+  MeshSource,
+  MultiscaleFragmentChunk,
+  MultiscaleManifestChunk,
+  MultiscaleMeshSource,
+} from "neuroglancer/mesh/backend";
+import {
+  getGrapheneFragmentKey,
+  MultiscaleMeshSourceParameters,
+  responseIdentity,
+} from "neuroglancer/datasource/graphene/base";
+import { CancellationToken } from "neuroglancer/util/cancellation";
+import { isNotFoundError, responseArrayBuffer, responseJson } from "neuroglancer/util/http_request";
+import {
+  cancellableFetchSpecialOk,
+  SpecialProtocolCredentials,
+  SpecialProtocolCredentialsProvider,
+} from "neuroglancer/util/special_protocol_request";
+import { Uint64 } from "neuroglancer/util/uint64";
+import { registerSharedObject } from "neuroglancer/worker_rpc";
+import {
+  ChunkedGraphSourceParameters,
+  MeshSourceParameters,
+} from "neuroglancer/datasource/graphene/base";
+import { decodeManifestChunk } from "neuroglancer/datasource/precomputed/backend";
+import { fetchSpecialHttpByteRange } from "neuroglancer/util/byte_range_http_requests";
+import debounce from "lodash/debounce";
+import { withChunkManager, Chunk, ChunkSource } from "neuroglancer/chunk_manager/backend";
+import { ChunkPriorityTier, ChunkState } from "neuroglancer/chunk_manager/base";
+import {
+  TransformedSource,
+  forEachPlaneIntersectingVolumetricChunk,
+  getNormalizedChunkLayout,
+  SliceViewProjectionParameters,
+} from "neuroglancer/sliceview/base";
+import {
+  CHUNKED_GRAPH_LAYER_RPC_ID,
+  ChunkedGraphChunkSpecification,
+  CHUNKED_GRAPH_RENDER_LAYER_UPDATE_SOURCES_RPC_ID,
+  RENDER_RATIO_LIMIT,
+} from "neuroglancer/datasource/graphene/base";
+import { Uint64Set } from "neuroglancer/uint64_set";
+import { vec3, vec3Key } from "neuroglancer/util/geom";
+import { registerRPC, RPC } from "neuroglancer/worker_rpc";
 
-import { deserializeTransformedSources, SliceViewChunkSourceBackend } from 'neuroglancer/sliceview/backend';
-import { getBasePriority, getPriorityTier, withSharedVisibility } from 'neuroglancer/visibility_priority/backend';
-import {isBaseSegmentId} from 'neuroglancer/datasource/graphene/base';
-import { withSegmentationLayerBackendState } from 'neuroglancer/segmentation_display_state/backend';
-import { RenderedViewBackend, RenderLayerBackend, RenderLayerBackendAttachment } from 'neuroglancer/render_layer_backend';
-import { SharedWatchableValue } from 'neuroglancer/shared_watchable_value';
-import { DisplayDimensionRenderInfo } from 'neuroglancer/navigation_state';
-import { forEachVisibleSegment } from 'neuroglancer/segmentation_display_state/base';
-import { computeChunkBounds } from 'neuroglancer/sliceview/volume/backend';
-import { verifyObject } from 'neuroglancer/util/json';
+import {
+  deserializeTransformedSources,
+  SliceViewChunkSourceBackend,
+} from "neuroglancer/sliceview/backend";
+import {
+  getBasePriority,
+  getPriorityTier,
+  withSharedVisibility,
+} from "neuroglancer/visibility_priority/backend";
+import { isBaseSegmentId } from "neuroglancer/datasource/graphene/base";
+import { withSegmentationLayerBackendState } from "neuroglancer/segmentation_display_state/backend";
+import {
+  RenderedViewBackend,
+  RenderLayerBackend,
+  RenderLayerBackendAttachment,
+} from "neuroglancer/render_layer_backend";
+import { SharedWatchableValue } from "neuroglancer/shared_watchable_value";
+import { DisplayDimensionRenderInfo } from "neuroglancer/navigation_state";
+import { forEachVisibleSegment } from "neuroglancer/segmentation_display_state/base";
+import { computeChunkBounds } from "neuroglancer/sliceview/volume/backend";
+import { verifyObject } from "neuroglancer/util/json";
 
 function getVerifiedFragmentPromise(
-    credentialsProvider: SpecialProtocolCredentialsProvider,
-    fragmentId: string|null,
-    parameters: MeshSourceParameters|MultiscaleMeshSourceParameters,
-    cancellationToken: CancellationToken) {
-  if (fragmentId && fragmentId.charAt(0) === '~') {
-    let parts = fragmentId.substr(1).split(':');
-    let startOffset: Uint64|number, endOffset: Uint64|number;
+  credentialsProvider: SpecialProtocolCredentialsProvider,
+  fragmentId: string | null,
+  parameters: MeshSourceParameters | MultiscaleMeshSourceParameters,
+  cancellationToken: CancellationToken,
+) {
+  if (fragmentId && fragmentId.charAt(0) === "~") {
+    let parts = fragmentId.substr(1).split(":");
+    let startOffset: Uint64 | number, endOffset: Uint64 | number;
     startOffset = Number(parts[1]);
-    endOffset = startOffset+Number(parts[2]);
-    return fetchSpecialHttpByteRange(credentialsProvider,
+    endOffset = startOffset + Number(parts[2]);
+    return fetchSpecialHttpByteRange(
+      credentialsProvider,
       `${parameters.fragmentUrl}/initial/${parts[0]}`,
       startOffset,
       endOffset,
-      cancellationToken
+      cancellationToken,
     );
   }
   return cancellableFetchSpecialOk(
     credentialsProvider,
-    `${parameters.fragmentUrl}/dynamic/${fragmentId}`, {}, responseArrayBuffer,
-    cancellationToken);
+    `${parameters.fragmentUrl}/dynamic/${fragmentId}`,
+    {},
+    responseArrayBuffer,
+    cancellationToken,
+  );
 }
 
 function getFragmentDownloadPromise(
-    credentialsProvider: SpecialProtocolCredentialsProvider,
-    fragmentId: string|null,
-    parameters: MeshSourceParameters|MultiscaleMeshSourceParameters,
-    cancellationToken: CancellationToken) {
+  credentialsProvider: SpecialProtocolCredentialsProvider,
+  fragmentId: string | null,
+  parameters: MeshSourceParameters | MultiscaleMeshSourceParameters,
+  cancellationToken: CancellationToken,
+) {
   let fragmentDownloadPromise;
-  if (parameters.sharding){
-    fragmentDownloadPromise = getVerifiedFragmentPromise(credentialsProvider, fragmentId, parameters, cancellationToken);
+  if (parameters.sharding) {
+    fragmentDownloadPromise = getVerifiedFragmentPromise(
+      credentialsProvider,
+      fragmentId,
+      parameters,
+      cancellationToken,
+    );
   } else {
     fragmentDownloadPromise = cancellableFetchSpecialOk(
       credentialsProvider,
-      `${parameters.fragmentUrl}/${fragmentId}`, {}, responseArrayBuffer,
-      cancellationToken);
+      `${parameters.fragmentUrl}/${fragmentId}`,
+      {},
+      responseArrayBuffer,
+      cancellationToken,
+    );
   }
   return fragmentDownloadPromise;
 }
 
-async function decodeDracoFragmentChunk(
-    chunk: FragmentChunk, response: ArrayBuffer) {
-  const m = await import(/* webpackChunkName: "draco" */ 'neuroglancer/mesh/draco');
+async function decodeDracoFragmentChunk(chunk: FragmentChunk, response: ArrayBuffer) {
+  const m = await import(/* webpackChunkName: "draco" */ "neuroglancer/mesh/draco");
   const rawMesh = await m.decodeDraco(new Uint8Array(response));
   assignMeshFragmentData(chunk, rawMesh);
 }
 
-@registerSharedObject() export class GrapheneMeshSource extends
-(WithParameters(WithSharedCredentialsProviderCounterpart<SpecialProtocolCredentials>()(MeshSource), MeshSourceParameters)) {
+@registerSharedObject()
+export class GrapheneMeshSource extends WithParameters(
+  WithSharedCredentialsProviderCounterpart<SpecialProtocolCredentials>()(MeshSource),
+  MeshSourceParameters,
+) {
   async download(chunk: ManifestChunk, cancellationToken: CancellationToken) {
-    const {parameters} = this;
+    const { parameters } = this;
     if (isBaseSegmentId(chunk.objectId, parameters.nBitsForLayerId)) {
-      return decodeManifestChunk(chunk, {fragments: []});
+      return decodeManifestChunk(chunk, { fragments: [] });
     }
     let url = `${parameters.manifestUrl}/manifest`;
     let manifestUrl = `${url}/${chunk.objectId}:${parameters.lod}?verify=1&prepend_seg_ids=1`;
 
-    await cancellableFetchSpecialOk(this.credentialsProvider, manifestUrl, {}, responseJson, cancellationToken)
-        .then(response => decodeManifestChunk(chunk, response));
+    await cancellableFetchSpecialOk(
+      this.credentialsProvider,
+      manifestUrl,
+      {},
+      responseJson,
+      cancellationToken,
+    ).then((response) => decodeManifestChunk(chunk, response));
   }
 
   async downloadFragment(chunk: FragmentChunk, cancellationToken: CancellationToken) {
-    const {parameters} = this;
+    const { parameters } = this;
 
     try {
       const response = await getFragmentDownloadPromise(
-        undefined, chunk.fragmentId, parameters, cancellationToken);
+        undefined,
+        chunk.fragmentId,
+        parameters,
+        cancellationToken,
+      );
       await decodeDracoFragmentChunk(chunk, response);
     } catch (e) {
       if (isNotFoundError(e)) {
@@ -122,7 +189,7 @@ async function decodeDracoFragmentChunk(
     }
   }
 
-  getFragmentKey(objectKey: string|null, fragmentId: string) {
+  getFragmentKey(objectKey: string | null, fragmentId: string) {
     objectKey;
     return getGrapheneFragmentKey(fragmentId);
   }
@@ -134,7 +201,7 @@ interface ShardInfo {
 }
 
 interface GrapheneMultiscaleManifestChunk extends MultiscaleManifestChunk {
-  fragmentIds: FragmentId[]|null;
+  fragmentIds: FragmentId[] | null;
   shardInfo?: ShardInfo;
 }
 
@@ -148,51 +215,97 @@ function decodeMultiscaleManifestChunk(chunk: GrapheneMultiscaleManifestChunk, r
     vertexOffsets: new Float32Array(response.lodScales.length * 3),
     clipLowerBound: vec3.clone(response.clipLowerBound),
     clipUpperBound: vec3.clone(response.clipUpperBound),
-  }
+  };
+  console.log("original chunkShape", chunk.manifest.chunkShape.join());
+  chunk.manifest.chunkShape[0] /= 8;
+  chunk.manifest.chunkShape[1] /= 8;
+  chunk.manifest.chunkShape[2] /= 40;
   chunk.fragmentIds = response.fragments;
   chunk.manifest.clipLowerBound.fill(0);
-  chunk.manifest.clipUpperBound.fill(100000);
-  chunk.manifest.octree[5*(response.fragments.length-1) + 4] &= 0x7FFFFFFF;
-  chunk.manifest.octree[5*(response.fragments.length-1) + 3] |= 0x80000000;
+  chunk.manifest.clipUpperBound.fill(10000000);
+  chunk.manifest.octree[5 * (response.fragments.length - 1) + 4] &= 0x7fffffff;
+  chunk.manifest.octree[5 * (response.fragments.length - 1) + 3] |= 0x80000000;
 }
 
 async function decodeMultiscaleFragmentChunk(
-    chunk: MultiscaleFragmentChunk, response: ArrayBuffer) {
-  const {lod} = chunk;
+  chunk: MultiscaleFragmentChunk,
+  response: ArrayBuffer,
+) {
+  const { lod } = chunk;
   const source = chunk.manifestChunk!.source! as GrapheneMultiscaleMeshSource;
-  const m = await import(/* webpackChunkName: "draco" */ 'neuroglancer/mesh/draco');
+  const m = await import(/* webpackChunkName: "draco" */ "neuroglancer/mesh/draco");
   const rawMesh = await m.decodeDracoPartitioned(new Uint8Array(response), 0, lod !== 0, false);
+  rawMesh.vertexPositions = new Float32Array(
+    rawMesh.vertexPositions.buffer,
+    rawMesh.vertexPositions.byteOffset,
+    rawMesh.vertexPositions.length,
+  );
   assignMultiscaleMeshFragmentData(chunk, rawMesh, source.format.vertexPositionFormat);
+  const manifest = chunk.manifestChunk!.manifest!;
+  const minVertex = [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY],
+    maxVertex = [Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY];
+  const vertexPositions = chunk.meshData!.vertexPositions;
+  for (let i = 0; i < vertexPositions.length; ++i) {
+    const v = (vertexPositions as Float32Array)[i];
+    minVertex[i % 3] = Math.min(minVertex[i % 3], v);
+    maxVertex[i % 3] = Math.max(maxVertex[i % 3], v);
+  }
+  const { chunkShape } = manifest;
+  const expectedMin = [0, 0, 0],
+    expectedMax = [0, 0, 0];
+  const row = chunk.chunkIndex;
+  for (let i = 0; i < 3; ++i) {
+    const size = chunkShape[i] * 2 ** lod;
+    expectedMin[i] = size * manifest.octree[row * 5 + i] + manifest.chunkGridSpatialOrigin[i];
+    expectedMax[i] = expectedMin[i] + size;
+  }
+  console.log(
+    `lod=${lod} cell ${manifest.octree.slice(row * 5, row * 5 + 3).join(",")}: chunk shape=${chunkShape.join(",")} actual min=${minVertex}, max=${maxVertex}, expeted min=${expectedMin}, max=${expectedMax}`,
+  );
 }
 
-
 @registerSharedObject()
-export class GrapheneMultiscaleMeshSource extends
-(WithParameters(WithSharedCredentialsProviderCounterpart<SpecialProtocolCredentials>()(MultiscaleMeshSource), MultiscaleMeshSourceParameters)) {
-  async download(chunk: GrapheneMultiscaleManifestChunk, cancellationToken: CancellationToken):
-      Promise<void> {
-    const {parameters} = this;
+export class GrapheneMultiscaleMeshSource extends WithParameters(
+  WithSharedCredentialsProviderCounterpart<SpecialProtocolCredentials>()(MultiscaleMeshSource),
+  MultiscaleMeshSourceParameters,
+) {
+  async download(
+    chunk: GrapheneMultiscaleManifestChunk,
+    cancellationToken: CancellationToken,
+  ): Promise<void> {
+    const { parameters } = this;
     let url = `${parameters.manifestUrl}/manifest/multiscale`;
     let manifestUrl = `${url}/${chunk.objectId}?verify=1&prepend_seg_ids=1`;
-    await cancellableFetchSpecialOk(this.credentialsProvider, manifestUrl, {}, responseJson, cancellationToken)
-        .then(response => decodeMultiscaleManifestChunk(chunk, response));
+    await cancellableFetchSpecialOk(
+      this.credentialsProvider,
+      manifestUrl,
+      {},
+      responseJson,
+      cancellationToken,
+    ).then((response) => decodeMultiscaleManifestChunk(chunk, response));
   }
 
   async downloadFragment(
-      chunk: MultiscaleFragmentChunk, cancellationToken: CancellationToken): Promise<void> {
-    const {parameters} = this;
+    chunk: MultiscaleFragmentChunk,
+    cancellationToken: CancellationToken,
+  ): Promise<void> {
+    const { parameters } = this;
     const manifestChunk = chunk.manifestChunk! as GrapheneMultiscaleManifestChunk;
     const chunkIndex = chunk.chunkIndex;
-    const {fragmentIds} = manifestChunk;
+    const { fragmentIds } = manifestChunk;
 
     try {
       let fragmentId = null;
-      if (fragmentIds !== null){
+      if (fragmentIds !== null) {
         fragmentId = fragmentIds[chunkIndex];
-        fragmentId = fragmentId.substring(fragmentId.indexOf(':') + 1)
+        fragmentId = fragmentId.substring(fragmentId.indexOf(":") + 1);
       }
       const response = await getFragmentDownloadPromise(
-        undefined, fragmentId, parameters, cancellationToken);
+        undefined,
+        fragmentId,
+        parameters,
+        cancellationToken,
+      );
       await decodeMultiscaleFragmentChunk(chunk, response);
     } catch (e) {
       if (isNotFoundError(e)) {
@@ -202,7 +315,7 @@ export class GrapheneMultiscaleMeshSource extends
     }
   }
 
-  getFragmentKey(objectKey: string|null, fragmentId: string) {
+  getFragmentKey(objectKey: string | null, fragmentId: string) {
     objectKey;
     return getGrapheneFragmentKey(fragmentId);
   }
@@ -211,10 +324,10 @@ export class GrapheneMultiscaleMeshSource extends
 export class ChunkedGraphChunk extends Chunk {
   backendOnly = true;
   chunkGridPosition: Float32Array;
-  source: GrapheneChunkedGraphChunkSource|null = null;
+  source: GrapheneChunkedGraphChunkSource | null = null;
   segment: Uint64;
   leaves: Uint64[] = [];
-  chunkDataSize: Uint32Array|null;
+  chunkDataSize: Uint32Array | null;
 
   initializeVolumeChunk(key: string, chunkGridPosition: Float32Array) {
     super.initialize(key);
@@ -252,8 +365,11 @@ function decodeChunkedGraphChunk(leaves: string[]) {
   return final;
 }
 
-@registerSharedObject() export class GrapheneChunkedGraphChunkSource extends
-(WithParameters(WithSharedCredentialsProviderCounterpart<SpecialProtocolCredentials>()(ChunkSource), ChunkedGraphSourceParameters)) {
+@registerSharedObject()
+export class GrapheneChunkedGraphChunkSource extends WithParameters(
+  WithSharedCredentialsProviderCounterpart<SpecialProtocolCredentials>()(ChunkSource),
+  ChunkedGraphSourceParameters,
+) {
   spec: ChunkedGraphChunkSpecification;
   chunks: Map<string, ChunkedGraphChunk>;
   tempChunkDataSize: Uint32Array;
@@ -268,23 +384,30 @@ function decodeChunkedGraphChunk(leaves: string[]) {
   }
 
   async download(chunk: ChunkedGraphChunk, cancellationToken: CancellationToken): Promise<void> {
-    let {parameters} = this;
+    let { parameters } = this;
     let chunkPosition = this.computeChunkBounds(chunk);
     let chunkDataSize = chunk.chunkDataSize!;
-    let bounds = `${chunkPosition[0]}-${chunkPosition[0] + chunkDataSize[0]}_` +
-        `${chunkPosition[1]}-${chunkPosition[1] + chunkDataSize[1]}_` +
-        `${chunkPosition[2]}-${chunkPosition[2] + chunkDataSize[2]}`;
+    let bounds =
+      `${chunkPosition[0]}-${chunkPosition[0] + chunkDataSize[0]}_` +
+      `${chunkPosition[1]}-${chunkPosition[1] + chunkDataSize[1]}_` +
+      `${chunkPosition[2]}-${chunkPosition[2] + chunkDataSize[2]}`;
 
-    const request = cancellableFetchSpecialOk(this.credentialsProvider,
-        `${parameters.url}/${chunk.segment}/leaves?int64_as_str=1&bounds=${bounds}`, {}, responseIdentity,
-        cancellationToken);
+    const request = cancellableFetchSpecialOk(
+      this.credentialsProvider,
+      `${parameters.url}/${chunk.segment}/leaves?int64_as_str=1&bounds=${bounds}`,
+      {},
+      responseIdentity,
+      cancellationToken,
+    );
     await this.withErrorMessage(
-        request, `Fetching leaves of segment ${chunk.segment} in region ${bounds}: `)
-      .then(res => res.json())
-      .then(res => {
-        chunk.leaves = decodeChunkedGraphChunk(res['leaf_ids'])
+      request,
+      `Fetching leaves of segment ${chunk.segment} in region ${bounds}: `,
+    )
+      .then((res) => res.json())
+      .then((res) => {
+        chunk.leaves = decodeChunkedGraphChunk(res["leaf_ids"]);
       })
-      .catch(err => console.error(err));
+      .catch((err) => console.error(err));
   }
 
   getChunk(chunkGridPosition: Float32Array, segment: Uint64) {
@@ -310,7 +433,7 @@ function decodeChunkedGraphChunk(leaves: string[]) {
     } else {
       let msg: string;
       try {
-        msg = (await response.json())['message'];
+        msg = (await response.json())["message"];
       } catch {
         msg = await response.text();
       }
@@ -321,8 +444,7 @@ function decodeChunkedGraphChunk(leaves: string[]) {
 
 interface ChunkedGraphRenderLayerAttachmentState {
   displayDimensionRenderInfo: DisplayDimensionRenderInfo;
-  transformedSource?: TransformedSource<
-      ChunkedGraphLayer, GrapheneChunkedGraphChunkSource>;
+  transformedSource?: TransformedSource<ChunkedGraphLayer, GrapheneChunkedGraphChunkSource>;
 }
 
 const tempChunkPosition = vec3.create();
@@ -330,8 +452,9 @@ const tempCenter = vec3.create();
 const tempChunkSize = vec3.create();
 
 @registerSharedObject(CHUNKED_GRAPH_LAYER_RPC_ID)
-export class ChunkedGraphLayer extends withSegmentationLayerBackendState
-(withSharedVisibility(withChunkManager(RenderLayerBackend))) {
+export class ChunkedGraphLayer extends withSegmentationLayerBackendState(
+  withSharedVisibility(withChunkManager(RenderLayerBackend)),
+) {
   source: GrapheneChunkedGraphChunkSource;
   localPosition: SharedWatchableValue<Float32Array>;
   leafRequestsActive: SharedWatchableValue<boolean>;
@@ -339,23 +462,33 @@ export class ChunkedGraphLayer extends withSegmentationLayerBackendState
 
   constructor(rpc: RPC, options: any) {
     super(rpc, options);
-    this.source = this.registerDisposer(rpc.getRef<GrapheneChunkedGraphChunkSource>(options['source']));
+    this.source = this.registerDisposer(
+      rpc.getRef<GrapheneChunkedGraphChunkSource>(options["source"]),
+    );
     this.localPosition = rpc.get(options.localPosition);
     this.leafRequestsActive = rpc.get(options.leafRequestsActive);
     this.nBitsForLayerId = rpc.get(options.nBitsForLayerId);
 
-    this.registerDisposer(this.chunkManager.recomputeChunkPriorities.add(() => {
-      this.updateChunkPriorities();
-      this.debouncedupdateDisplayState();
-    }));
+    this.registerDisposer(
+      this.chunkManager.recomputeChunkPriorities.add(() => {
+        this.updateChunkPriorities();
+        this.debouncedupdateDisplayState();
+      }),
+    );
   }
 
-  attach(attachment: RenderLayerBackendAttachment<RenderedViewBackend, ChunkedGraphRenderLayerAttachmentState>): void {
+  attach(
+    attachment: RenderLayerBackendAttachment<
+      RenderedViewBackend,
+      ChunkedGraphRenderLayerAttachmentState
+    >,
+  ): void {
     const scheduleUpdateChunkPriorities = () => this.chunkManager.scheduleUpdateChunkPriorities();
-    const {view} = attachment;
+    const { view } = attachment;
     attachment.registerDisposer(scheduleUpdateChunkPriorities);
     attachment.registerDisposer(
-        view.projectionParameters.changed.add(scheduleUpdateChunkPriorities));
+      view.projectionParameters.changed.add(scheduleUpdateChunkPriorities),
+    );
     attachment.registerDisposer(view.visibility.changed.add(scheduleUpdateChunkPriorities));
     attachment.state = {
       displayDimensionRenderInfo: view.projectionParameters.value.displayDimensionRenderInfo,
@@ -369,17 +502,17 @@ export class ChunkedGraphLayer extends withSegmentationLayerBackendState
   }
 
   private updateChunkPriorities() {
-    const {source, chunkManager} = this;
+    const { source, chunkManager } = this;
     chunkManager.registerLayer(this);
     for (const attachment of this.attachments.values()) {
-      const {view} = attachment;
+      const { view } = attachment;
       const visibility = view.visibility.value;
       if (visibility === Number.NEGATIVE_INFINITY) {
         continue;
       }
 
       const attachmentState = attachment.state! as ChunkedGraphRenderLayerAttachmentState;
-      const {transformedSource: tsource} = attachmentState;
+      const { transformedSource: tsource } = attachmentState;
       const projectionParameters = view.projectionParameters.value as SliceViewProjectionParameters;
 
       if (!tsource) {
@@ -388,7 +521,8 @@ export class ChunkedGraphLayer extends withSegmentationLayerBackendState
 
       const pixelSize = projectionParameters.pixelSize * 1.1;
       const smallestVoxelSize = tsource.effectiveVoxelSize;
-      this.leafRequestsActive.value = this.renderRatioLimit >= pixelSize / Math.min(...smallestVoxelSize);
+      this.leafRequestsActive.value =
+        this.renderRatioLimit >= pixelSize / Math.min(...smallestVoxelSize);
       if (!this.leafRequestsActive.value) {
         continue;
       }
@@ -396,8 +530,8 @@ export class ChunkedGraphLayer extends withSegmentationLayerBackendState
       const priorityTier = getPriorityTier(visibility);
       const basePriority = getBasePriority(visibility);
 
-      const {chunkLayout} = tsource;
-      const {size, finiteRank} = chunkLayout;
+      const { chunkLayout } = tsource;
+      const { size, finiteRank } = chunkLayout;
 
       const chunkSize = tempChunkSize;
       const localCenter = tempCenter;
@@ -406,42 +540,48 @@ export class ChunkedGraphLayer extends withSegmentationLayerBackendState
         chunkSize[i] = 0;
         localCenter[i] = 0;
       }
-      const {centerDataPosition} = projectionParameters;
+      const { centerDataPosition } = projectionParameters;
       chunkLayout.globalToLocalSpatial(localCenter, centerDataPosition);
 
       forEachPlaneIntersectingVolumetricChunk(
-        projectionParameters, this.localPosition.value, tsource,
+        projectionParameters,
+        this.localPosition.value,
+        tsource,
         getNormalizedChunkLayout(projectionParameters, chunkLayout),
-          positionInChunks => {
-        vec3.multiply(tempChunkPosition, positionInChunks, chunkSize);
-        const priority = -vec3.distance(localCenter, tempChunkPosition);
-        const {curPositionInChunks} = tsource;
+        (positionInChunks) => {
+          vec3.multiply(tempChunkPosition, positionInChunks, chunkSize);
+          const priority = -vec3.distance(localCenter, tempChunkPosition);
+          const { curPositionInChunks } = tsource;
 
-        forEachVisibleSegment(this, (segment, _) => {
-          if (isBaseSegmentId(segment, this.nBitsForLayerId.value)) return; // TODO maybe support highBitRepresentation?
-          const chunk = source.getChunk(curPositionInChunks, segment.clone());
-          chunkManager.requestChunk(chunk, priorityTier, basePriority + priority);
-          ++this.numVisibleChunksNeeded;
-          if (chunk.state === ChunkState.GPU_MEMORY) {
-            ++this.numVisibleChunksAvailable;
-          }
-        });
-      });
+          forEachVisibleSegment(this, (segment, _) => {
+            if (isBaseSegmentId(segment, this.nBitsForLayerId.value)) return; // TODO maybe support highBitRepresentation?
+            const chunk = source.getChunk(curPositionInChunks, segment.clone());
+            chunkManager.requestChunk(chunk, priorityTier, basePriority + priority);
+            ++this.numVisibleChunksNeeded;
+            if (chunk.state === ChunkState.GPU_MEMORY) {
+              ++this.numVisibleChunksAvailable;
+            }
+          });
+        },
+      );
     }
   }
 
   private forEachSelectedRootWithLeaves(
-    callback: (rootObjectKey: string, leaves: Uint64[]) => void) {
-      const {source} = this;
+    callback: (rootObjectKey: string, leaves: Uint64[]) => void,
+  ) {
+    const { source } = this;
 
-      for (const chunk of source.chunks.values()) {
-        if (chunk.state === ChunkState.SYSTEM_MEMORY_WORKER &&
-            chunk.priorityTier < ChunkPriorityTier.RECENT) {
-          if (this.visibleSegments.has(chunk.segment) && chunk.leaves.length) {
-            callback(chunk.segment.toString(), chunk.leaves);
-          }
+    for (const chunk of source.chunks.values()) {
+      if (
+        chunk.state === ChunkState.SYSTEM_MEMORY_WORKER &&
+        chunk.priorityTier < ChunkPriorityTier.RECENT
+      ) {
+        if (this.visibleSegments.has(chunk.segment) && chunk.leaves.length) {
+          callback(chunk.segment.toString(), chunk.leaves);
         }
       }
+    }
   }
 
   private debouncedupdateDisplayState = debounce(() => {
@@ -479,7 +619,7 @@ export class ChunkedGraphLayer extends withSegmentationLayerBackendState
         this.segmentEquivalences.delete([...this.segmentEquivalences.setElements(Uint64.parseString(root))].filter(x
       => !leaves.has(x) && !this.visibleSegments.has(x)));
       }*/
-      const filteredLeaves = [...leaves].filter(x => !this.segmentEquivalences.has(x));
+      const filteredLeaves = [...leaves].filter((x) => !this.segmentEquivalences.has(x));
 
       const rootInt = Uint64.parseString(root);
 
@@ -490,15 +630,20 @@ export class ChunkedGraphLayer extends withSegmentationLayerBackendState
   }
 }
 
-registerRPC(CHUNKED_GRAPH_RENDER_LAYER_UPDATE_SOURCES_RPC_ID, function(x) {
+registerRPC(CHUNKED_GRAPH_RENDER_LAYER_UPDATE_SOURCES_RPC_ID, function (x) {
   const view = this.get(x.view) as RenderedViewBackend;
   const layer = this.get(x.layer) as ChunkedGraphLayer;
-  const attachment = layer.attachments.get(view)! as
-      RenderLayerBackendAttachment<RenderedViewBackend, ChunkedGraphRenderLayerAttachmentState>;
+  const attachment = layer.attachments.get(view)! as RenderLayerBackendAttachment<
+    RenderedViewBackend,
+    ChunkedGraphRenderLayerAttachmentState
+  >;
   attachment.state!.transformedSource = deserializeTransformedSources<
-      SliceViewChunkSourceBackend, ChunkedGraphLayer>(
-      this, x.sources, layer)[0][0] as unknown as TransformedSource<
-      ChunkedGraphLayer, GrapheneChunkedGraphChunkSource>;
+    SliceViewChunkSourceBackend,
+    ChunkedGraphLayer
+  >(this, x.sources, layer)[0][0] as unknown as TransformedSource<
+    ChunkedGraphLayer,
+    GrapheneChunkedGraphChunkSource
+  >;
   attachment.state!.displayDimensionRenderInfo = x.displayDimensionRenderInfo;
   layer.chunkManager.scheduleUpdateChunkPriorities();
 });

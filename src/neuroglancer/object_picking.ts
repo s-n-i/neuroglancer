@@ -14,17 +14,17 @@
  * limitations under the License.
  */
 
-import {MouseSelectionState} from 'neuroglancer/layer';
-import {RenderLayer} from 'neuroglancer/renderlayer';
-import {Uint64} from 'neuroglancer/util/uint64';
+import { MouseSelectionState } from "neuroglancer/layer";
+import { RenderLayer } from "neuroglancer/renderlayer";
+import { Uint64 } from "neuroglancer/util/uint64";
 
-const DEBUG_PICKING = false;
+const DEBUG_PICKING = true;
 
 export class PickIDManager {
   /**
    * This specifies the render layer corresponding to each registered entry.
    */
-  private renderLayers: (RenderLayer|null)[] = [null];
+  private renderLayers: (RenderLayer | null)[] = [null];
 
   private pickData: any[] = [null];
 
@@ -51,7 +51,7 @@ export class PickIDManager {
   }
 
   register(renderLayer: RenderLayer, count = 1, low = 0, high = 0, data: any = null): number {
-    let {renderLayers, values} = this;
+    let { renderLayers, values } = this;
     let pickID = this.nextPickID;
     this.nextPickID += count;
     let index = renderLayers.length;
@@ -69,8 +69,9 @@ export class PickIDManager {
    */
   setMouseState(mouseState: MouseSelectionState, pickID: number) {
     // Binary search to find largest registered index with a pick ID <= pickID.
-    const {renderLayers, values} = this;
-    let lower = 0, upper = renderLayers.length - 1;
+    const { renderLayers, values } = this;
+    let lower = 0,
+      upper = renderLayers.length - 1;
     while (lower < upper) {
       const mid = Math.ceil(lower + (upper - lower) / 2);
       if (values[mid * 3] > pickID) {
@@ -79,14 +80,17 @@ export class PickIDManager {
         lower = mid;
       }
     }
-    const pickedRenderLayer = mouseState.pickedRenderLayer = renderLayers[lower];
+    const pickedRenderLayer = (mouseState.pickedRenderLayer = renderLayers[lower]);
     const valuesOffset = lower * 3;
-    const pickedOffset = mouseState.pickedOffset = pickID - values[valuesOffset];
+    const pickedOffset = (mouseState.pickedOffset = pickID - values[valuesOffset]);
     if (DEBUG_PICKING) {
       console.log(
-          `Looking up pick ID ${pickID}: renderLayer`, pickedRenderLayer, `offset=${pickedOffset}`);
+        `Looking up pick ID ${pickID}: renderLayer`,
+        pickedRenderLayer,
+        `offset=${pickedOffset}`,
+      );
     }
-    let {pickedValue} = mouseState;
+    let { pickedValue } = mouseState;
     pickedValue.low = values[valuesOffset + 1];
     pickedValue.high = values[valuesOffset + 2];
     mouseState.pickedAnnotationId = undefined;
@@ -100,7 +104,8 @@ export class PickIDManager {
     if (pickedRenderLayer !== null) {
       if (DEBUG_PICKING) {
         console.log(
-            `Picked value=${pickedValue}, offset=${pickedOffset}, data=${this.pickData[lower]}`);
+          `Picked value=${pickedValue}, offset=${pickedOffset}, data=${this.pickData[lower]}`,
+        );
       }
       pickedRenderLayer.updateMouseState(mouseState, pickedValue, pickedOffset, data);
     }
